@@ -59,17 +59,23 @@
 
 typedef enum {TRUE = 1, FALSE = 0} bool;
 
+typedef struct {
+  int length;
+  int mem_size;
+  char * data;
+} char_list;
+
 int create_socket(int port);
+int create_connection();
 void sigchld_handler(int signal);
 void sigterm_handler(int signal);
 void server_loop();
 void handle_client(int client_sock, struct sockaddr_in client_addr);
 void forward_data(int source_sock, int destination_sock);
-void forward_data_ext(int source_sock, int destination_sock, char *cmd);
+void forward_char_list(char_list *list, int destination_sock);
 int parse_options(int argc, char *argv[]);
 
 int server_sock, client_sock, remote_sock, remote_port = 0;
-char *remote_host, *cmd_in, *cmd_out;
 bool foreground = FALSE;
 
 /* Program start */
@@ -80,7 +86,7 @@ int main(int argc, char *argv[]) {
     local_port = parse_options(argc, argv);
 
     if (local_port < 0) {
-        printf("Syntax: %s -l local_port -h remote_host -p remote_port [-i \"input parser\"] [-o \"output parser\"] [-f (stay in foreground)]\n", argv[0]);
+        printf("Syntax: %s -l local_port -p remote_port [-f (stay in foreground)]\n", argv[0]);
         return local_port;
     }
 
@@ -119,24 +125,15 @@ int parse_options(int argc, char *argv[]) {
             case 'l':
                 local_port = atoi(optarg);
                 break;
-            case 'h':
-                remote_host = optarg;
-                break;
             case 'p':
                 remote_port = atoi(optarg);
-                break;
-            case 'i':
-                cmd_in = optarg;
-                break;
-            case 'o':
-                cmd_out = optarg;
                 break;
             case 'f':
                 foreground = TRUE;
         }
     }
 
-    if (local_port && remote_host && remote_port) {
+    if (local_port && remote_port) {
         return local_port;
     } else {
         return SYNTAX_ERROR;
@@ -178,7 +175,7 @@ void sigchld_handler(int signal) {
 }
 
 /* Handle term signal */
-void sigterm_handler(int signal) {
+void sigterm_handler(int signal){
     close(client_sock);
     close(server_sock);
     exit(0);
@@ -191,124 +188,163 @@ void server_loop() {
 
     while (TRUE) {
         client_sock = accept(server_sock, (struct sockaddr*)&client_addr, &addrlen);
-        if (fork() == 0) { // handle client connection in a separate process
+        if (fork() == 0){
+			//for the child process: accept the burden of your parent and die
             close(server_sock);
             handle_client(client_sock, client_addr);
             exit(0);
         }
+		//for the parent: just chill yo
         close(client_sock);
     }
+}
 
+/* dynamically sized char buffer */
+char_list char_list_init(){
+	char_list list;
+	list.length = 0;
+	list.mem_size = 2;
+	list.data = NULL;
+	return list;
+}
+void char_list_add(char_list *list, char * new, int new_len){
+	while(list->mem_size - list->length < new_len){
+		list->mem_size *= 2;
+	}
+	list->data = realloc(list->data, list->mem_size);
+	strncpy(&list->data[list->length], new, new_len);
+	list->length += new_len;
+}
+
+void print_char_list(char_list list){
+	for (int i = 0; i < list.length; i++) {
+		printf("%c", list.data[i]);
+	}
+	printf("\n");
 }
 
 /* Handle client connection */
 void handle_client(int client_sock, struct sockaddr_in client_addr)
 {
-    if ((remote_sock = create_connection()) < 0) {
-        perror("Cannot connect to host");
-        return;
-    }
-
-    if (fork() == 0) { // a process forwarding data from client to remote socket
-        if (cmd_out) {
-            forward_data_ext(client_sock, remote_sock, cmd_out);
-        } else {
-            forward_data(client_sock, remote_sock);
-        }
+	//find out where to connect
+	char buffer[BUF_SIZE];
+	char host_addr[BUF_SIZE];
+	char service[20];
+	int n, remote_sock;
+	char_list request = char_list_init();
+	//read everything out of the client socket
+	while ((n = recv(client_sock, buffer, BUF_SIZE, 0)) > 0) { // read data from input socket
+		char_list_add(&request, buffer, n);
+		if(strncmp("GET", buffer, 3) == 0){
+			//get address
+			sscanf(buffer, "GET %[^:]://%[^/] %*s\n", service, host_addr);
+			remote_sock = create_connection(service, host_addr);
+		}else{
+			printf("Couldn't parse request: %s\n", buffer);
+		}
+		if(n < BUF_SIZE){
+			break;
+		}
+	}
+	print_char_list(request);
+	//quit if we don't have a socket
+	if(remote_sock < 0){
+		printf("error creating socket\n");
+		return;
+	}
+	//fork a child to handle client -> remote (upload)
+    if (fork() == 0) {
+        forward_char_list(&request, remote_sock);
         exit(0);
     }
-
-    if (fork() == 0) { // a process forwarding data from remote socket to client
-        if (cmd_in) {
-            forward_data_ext(remote_sock, client_sock, cmd_in);
-        } else {
-            forward_data(remote_sock, client_sock);
-        }
+	//fork a child to handle remote -> client (download)
+    if (fork() == 0) {
+        forward_data(remote_sock, client_sock);
         exit(0);
     }
-
+	//clean up
     close(remote_sock);
     close(client_sock);
 }
 
 /* Forward data between sockets */
 void forward_data(int source_sock, int destination_sock) {
-    char buffer[BUF_SIZE];
-    int n;
+	char buffer[BUF_SIZE];
+	int n;
+	char_list list = char_list_init();
 
-    while ((n = recv(source_sock, buffer, BUF_SIZE, 0)) > 0) { // read data from input socket
-        send(destination_sock, buffer, n, 0); // send data to output socket
-    }
+	while ((n = recv(source_sock, buffer, BUF_SIZE, 0)) > 0) { // read data from input socket
+		printf("receiving %d\n", n);
+		char_list_add(&list, buffer, n);
+		send(destination_sock, buffer, n, 0); // send data to output socket
+	}
 
-    shutdown(destination_sock, SHUT_RDWR); // stop other processes from using socket
-    close(destination_sock);
+	printf("done receiving\n");
+	print_char_list(list);
 
-    shutdown(source_sock, SHUT_RDWR); // stop other processes from using socket
-    close(source_sock);
+	shutdown(destination_sock, SHUT_RDWR); // stop other processes from using socket
+	close(destination_sock);
+
+	shutdown(source_sock, SHUT_RDWR); // stop other processes from using socket
+	close(source_sock);
 }
 
-/* Forward data between sockets through external command */
-void forward_data_ext(int source_sock, int destination_sock, char *cmd) {
-    char buffer[BUF_SIZE];
-    int n, i, pipe_in[2], pipe_out[2];
+/* Forward a char list to a socket */
+void forward_char_list(char_list *list, int destination_sock) {
+	int chunk = 0, sent, chunk_size;
+	int left = list->length;
 
-    if (pipe(pipe_in) < 0 || pipe(pipe_out) < 0) { // create command input and output pipes
-        perror("Cannot create pipe");
-        exit(CREATE_PIPE_ERROR);
-    }
+	while (chunk < list->length) { // read data from input socket
+		//figure out how much to send
+		if(left < BUF_SIZE){
+			chunk_size = left;
+		}else{
+			chunk_size = BUF_SIZE;
+		}
+		//take a potato chip...and eat it!
+		sent = send(destination_sock, &list->data[chunk], left, 0); // send data to output socket
+		printf("send %d bytes\n", sent);
+		chunk += BUF_SIZE;
+		left -= BUF_SIZE;
+	}
 
-    if (fork() == 0) {
-        dup2(pipe_in[READ], STDIN_FILENO); // replace standard input with input part of pipe_in
-        dup2(pipe_out[WRITE], STDOUT_FILENO); // replace standard output with output part of pipe_out
-        close(pipe_in[WRITE]); // close unused end of pipe_in
-        close(pipe_out[READ]); // close unused end of pipe_out
-        n = system(cmd); // execute command
-        exit(n);
-    } else {
-        close(pipe_in[READ]); // no need to read from input pipe here
-        close(pipe_out[WRITE]); // no need to write to output pipe here
-
-        while ((n = recv(source_sock, buffer, BUF_SIZE, 0)) > 0) { // read data from input socket
-            if (write(pipe_in[WRITE], buffer, n) < 0) { // write data to input pipe of external command
-                perror("Cannot write to pipe");
-                exit(BROKEN_PIPE_ERROR);
-            }
-            if ((i = read(pipe_out[READ], buffer, BUF_SIZE)) > 0) { // read command output
-                send(destination_sock, buffer, i, 0); // send data to output socket
-            }
-        }
-
-        shutdown(destination_sock, SHUT_RDWR); // stop other processes from using socket
-        close(destination_sock);
-
-        shutdown(source_sock, SHUT_RDWR); // stop other processes from using socket
-        close(source_sock);
-    }
+	//shutdown(destination_sock, SHUT_RDWR); // stop other processes from using socket
+	//close(destination_sock);
 }
 
 /* Create client connection */
-int create_connection() {
-    struct sockaddr_in server_addr;
+int create_connection(char *service, char *remote_host) {
+    struct sockaddr server_ip;
     struct hostent *server;
-    int sock;
-
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        return CLIENT_SOCKET_ERROR;
-    }
-
-    if ((server = gethostbyname(remote_host)) == NULL) {
-        errno = EFAULT;
-        return CLIENT_RESOLVE_ERROR;
-    }
-
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    memcpy(&server_addr.sin_addr.s_addr, server->h_addr, server->h_length);
-    server_addr.sin_port = htons(remote_port);
-
-    if (connect(sock, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
-        return CLIENT_CONNECT_ERROR;
-    }
-
-    return sock;
+	struct addrinfo hints, *server_info, *p;
+    int sock, rv;
+	//init some hints about our address
+	memset(&hints, 0, sizeof hints);
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+	// --- perform hostname lookup
+	if ((rv = getaddrinfo(remote_host, service, &hints, &server_info)) != 0) {
+		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
+		exit(1);
+	}
+	// loop through all the results and connect to the first we can
+	for(p = server_info; p != NULL; p = p->ai_next) {
+		if ((sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
+			perror("socket");
+			continue;
+		}
+		if (connect(sock, p->ai_addr, p->ai_addrlen) == -1) {
+			perror("connect");
+			close(sock);
+			continue;
+		}
+		break; // if we get here, we must have connected successfully
+	}
+	if (p == NULL) {
+		// looped off the end of the list with no connection
+		fprintf(stderr, "failed to connect\n");
+		exit(2);
+	}
+	freeaddrinfo(server_info); // all done with this structure
+	return sock;
 }
