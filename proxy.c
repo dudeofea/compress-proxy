@@ -1,7 +1,8 @@
 /*
- * Tiny TCP proxy server
+ * HTTP Compress Proxy, modified from:
  *
- * Author: Krzysztof Kliś <krzysztof.klis@gmail.com>
+ *	Micro Proxy: http://acme.com/software/micro_proxy/
+ *	Tiny TCP proxy server: Krzysztof Kliś <krzysztof.klis@gmail.com>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -40,6 +41,15 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <wait.h>
+#include <time.h>
+
+#include "structs.h"
+
+#define SERVER_NAME "compress_proxy"
+#define SERVER_URL "https://github.com/dudeofea"
+#define PROTOCOL "HTTP/1.0"
+#define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
+#define TIMEOUT 30
 
 #define BUF_SIZE 1024
 
@@ -59,23 +69,19 @@
 
 typedef enum {TRUE = 1, FALSE = 0} bool;
 
-typedef struct {
-  int length;
-  int mem_size;
-  char * data;
-} char_list;
-
 int create_socket(int port);
-int create_connection();
+int create_http_connection(int client_sock, char_list http_request, int* ssl);
 void sigchld_handler(int signal);
 void sigterm_handler(int signal);
 void server_loop();
 void handle_client(int client_sock, struct sockaddr_in client_addr);
 void forward_data(int source_sock, int destination_sock);
-void forward_char_list(char_list *list, int destination_sock);
+void forward_char_list(char_list list, int destination_sock);
 int parse_options(int argc, char *argv[]);
+static void send_error(int client_sock, int status, char* title, char* extra_header, char* text);
+static void proxy_ssl(char_list request, int client_sock, int remote_sock);
 
-int server_sock, client_sock, remote_sock, remote_port = 0;
+int server_sock, client_sock, remote_sock;
 bool foreground = FALSE;
 
 /* Program start */
@@ -86,7 +92,7 @@ int main(int argc, char *argv[]) {
     local_port = parse_options(argc, argv);
 
     if (local_port < 0) {
-        printf("Syntax: %s -l local_port -p remote_port [-f (stay in foreground)]\n", argv[0]);
+        printf("Syntax: %s -p local_port [-f (stay in foreground)]\n", argv[0]);
         return local_port;
     }
 
@@ -120,20 +126,17 @@ int main(int argc, char *argv[]) {
 int parse_options(int argc, char *argv[]) {
     int c, local_port = 0;
 
-    while ((c = getopt(argc, argv, "l:h:p:i:o:f")) != -1) {
+    while ((c = getopt(argc, argv, "p:f")) != -1) {
         switch(c) {
-            case 'l':
-                local_port = atoi(optarg);
-                break;
             case 'p':
-                remote_port = atoi(optarg);
+                local_port = atoi(optarg);
                 break;
             case 'f':
                 foreground = TRUE;
         }
     }
 
-    if (local_port && remote_port) {
+    if (local_port) {
         return local_port;
     } else {
         return SYNTAX_ERROR;
@@ -185,86 +188,71 @@ void sigterm_handler(int signal){
 void server_loop() {
     struct sockaddr_in client_addr;
     int addrlen = sizeof(client_addr);
-
-    while (TRUE) {
-        client_sock = accept(server_sock, (struct sockaddr*)&client_addr, &addrlen);
-        if (fork() == 0){
-			//for the child process: accept the burden of your parent and die
-            close(server_sock);
-            handle_client(client_sock, client_addr);
-            exit(0);
-        }
-		//for the parent: just chill yo
-        close(client_sock);
-    }
-}
-
-/* dynamically sized char buffer */
-char_list char_list_init(){
-	char_list list;
-	list.length = 0;
-	list.mem_size = 2;
-	list.data = NULL;
-	return list;
-}
-void char_list_add(char_list *list, char * new, int new_len){
-	while(list->mem_size - list->length < new_len){
-		list->mem_size *= 2;
-	}
-	list->data = realloc(list->data, list->mem_size);
-	strncpy(&list->data[list->length], new, new_len);
-	list->length += new_len;
-}
-
-void print_char_list(char_list list){
-	for (int i = 0; i < list.length; i++) {
-		printf("%c", list.data[i]);
-	}
-	printf("\n");
-}
-
-/* Handle client connection */
-void handle_client(int client_sock, struct sockaddr_in client_addr)
-{
-	//find out where to connect
 	char buffer[BUF_SIZE];
 	char host_addr[BUF_SIZE];
 	char service[20];
-	int n, remote_sock;
-	char_list request = char_list_init();
-	//read everything out of the client socket
-	while ((n = recv(client_sock, buffer, BUF_SIZE, 0)) > 0) { // read data from input socket
-		char_list_add(&request, buffer, n);
-		if(strncmp("GET", buffer, 3) == 0){
-			//get address
-			sscanf(buffer, "GET %[^:]://%[^/] %*s\n", service, host_addr);
-			remote_sock = create_connection(service, host_addr);
-		}else{
-			printf("Couldn't parse request: %s\n", buffer);
+	int n, remote_sock, ssl;
+	char_list request;
+
+    while (TRUE) {
+        client_sock = accept(server_sock, (struct sockaddr*)&client_addr, &addrlen);
+		//handle the incoming request
+		if(fork() == 0){
+			request = char_list_init();
+			//read everything out of the client socket
+			while ((n = recv(client_sock, buffer, BUF_SIZE, 0)) > 0) {
+				//add to request char list
+				char_list_add(&request, buffer, n);
+				//quit once we got all data
+				if(n < BUF_SIZE){
+					break;
+				}
+			}
+			//create a connection to remote host
+			remote_sock = create_http_connection(client_sock, request, &ssl);
+			//quit if we don't have a socket
+			if(remote_sock < 0){
+				printf("error creating socket\n");
+				return;
+			}
+			//handle an ssl request
+			if(ssl){
+				proxy_ssl(request, client_sock, remote_sock);
+			//handle a regular request
+			}else{
+				alarm(TIMEOUT);
+				forward_char_list(request, remote_sock);		//upload
+				forward_data(remote_sock, client_sock);			//download
+			}
+			close(server_sock);
+			close(remote_sock);
+			close(client_sock);
+			exit(0);
 		}
+	    close(client_sock);
+	}
+}
+
+//Proxy connections to an HTTPS connection, by MITM'ing our browser
+static void proxy_ssl(char_list request, int client_sock, int remote_sock){
+	//first return an OK to browser
+	char* ok = "HTTP/1.0 200 Connection established\r\n\r\n";
+	if(send(client_sock, ok, strlen(ok), 0) == 0){
+		//TODO: handle send error
+		printf("nothing sent\n");
+	}
+	//get response from browser
+	int n;
+	char buffer[BUF_SIZE];
+	char_list response = char_list_init();
+	while ((n = recv(client_sock, buffer, BUF_SIZE, 0)) > 0) {
+		char_list_add(&request, buffer, n);
 		if(n < BUF_SIZE){
 			break;
 		}
 	}
-	print_char_list(request);
-	//quit if we don't have a socket
-	if(remote_sock < 0){
-		printf("error creating socket\n");
-		return;
-	}
-	//fork a child to handle client -> remote (upload)
-    if (fork() == 0) {
-        forward_char_list(&request, remote_sock);
-        exit(0);
-    }
-	//fork a child to handle remote -> client (download)
-    if (fork() == 0) {
-        forward_data(remote_sock, client_sock);
-        exit(0);
-    }
-	//clean up
-    close(remote_sock);
-    close(client_sock);
+	printf("response: ");
+	char_list_print(response);
 }
 
 /* Forward data between sockets */
@@ -274,13 +262,13 @@ void forward_data(int source_sock, int destination_sock) {
 	char_list list = char_list_init();
 
 	while ((n = recv(source_sock, buffer, BUF_SIZE, 0)) > 0) { // read data from input socket
-		printf("receiving %d\n", n);
+		//printf("receiving %d bytes\n", n);
 		char_list_add(&list, buffer, n);
 		send(destination_sock, buffer, n, 0); // send data to output socket
 	}
 
-	printf("done receiving\n");
-	print_char_list(list);
+	printf("received %d bytes\n", list.length);
+	char_list_print(list);
 
 	shutdown(destination_sock, SHUT_RDWR); // stop other processes from using socket
 	close(destination_sock);
@@ -290,11 +278,11 @@ void forward_data(int source_sock, int destination_sock) {
 }
 
 /* Forward a char list to a socket */
-void forward_char_list(char_list *list, int destination_sock) {
+void forward_char_list(char_list list, int destination_sock) {
 	int chunk = 0, sent, chunk_size;
-	int left = list->length;
+	int left = list.length;
 
-	while (chunk < list->length) { // read data from input socket
+	while (chunk < list.length) { // read data from input socket
 		//figure out how much to send
 		if(left < BUF_SIZE){
 			chunk_size = left;
@@ -302,49 +290,222 @@ void forward_char_list(char_list *list, int destination_sock) {
 			chunk_size = BUF_SIZE;
 		}
 		//take a potato chip...and eat it!
-		sent = send(destination_sock, &list->data[chunk], left, 0); // send data to output socket
-		printf("send %d bytes\n", sent);
+		sent = send(destination_sock, &list.data[chunk], left, 0); // send data to output socket
+		printf("sent %d bytes\n", sent);
 		chunk += BUF_SIZE;
 		left -= BUF_SIZE;
 	}
-
-	//shutdown(destination_sock, SHUT_RDWR); // stop other processes from using socket
-	//close(destination_sock);
 }
 
-/* Create client connection */
-int create_connection(char *service, char *remote_host) {
-    struct sockaddr server_ip;
-    struct hostent *server;
-	struct addrinfo hints, *server_info, *p;
-    int sock, rv;
-	//init some hints about our address
-	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_STREAM;
-	// --- perform hostname lookup
-	if ((rv = getaddrinfo(remote_host, service, &hints, &server_info)) != 0) {
-		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
-		exit(1);
+//trim whitespace on a string
+static void trim(char* line){
+    int l;
+    l = strlen( line );
+    while ( line[l-1] == '\n' || line[l-1] == '\r' )
+	line[--l] = '\0';
+}
+
+#if defined(AF_INET6) && defined(IN6_IS_ADDR_V4MAPPED)
+#define USE_IPV6
+#endif
+//Open a connection (socket) to a given hostname and port
+static int create_connection(int client_sock, char* hostname, unsigned short port )
+    {
+#ifdef USE_IPV6
+    struct addrinfo hints;
+    char portstr[10];
+    int gaierr;
+    struct addrinfo* ai;
+    struct addrinfo* ai2;
+    struct addrinfo* aiv4;
+    struct addrinfo* aiv6;
+    struct sockaddr_in6 sa_in;
+#else /* USE_IPV6 */
+    struct hostent *he;
+    struct sockaddr_in sa_in;
+#endif /* USE_IPV6 */
+    int sa_len, sock_family, sock_type, sock_protocol;
+    int sockfd;
+
+    (void) memset( (void*) &sa_in, 0, sizeof(sa_in) );
+
+#ifdef USE_IPV6
+
+    (void) memset( &hints, 0, sizeof(hints) );
+    hints.ai_family = PF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    (void) snprintf( portstr, sizeof(portstr), "%d", (int) port );
+    if ( (gaierr = getaddrinfo( hostname, portstr, &hints, &ai )) != 0 )
+	send_error(client_sock, 404, "Not Found", (char*) 0, "Unknown host." );
+
+    /* Find the first IPv4 and IPv6 entries. */
+    aiv4 = (struct addrinfo*) 0;
+    aiv6 = (struct addrinfo*) 0;
+    for ( ai2 = ai; ai2 != (struct addrinfo*) 0; ai2 = ai2->ai_next )
+	{
+	switch ( ai2->ai_family )
+	    {
+	    case AF_INET:
+	    if ( aiv4 == (struct addrinfo*) 0 )
+		aiv4 = ai2;
+	    break;
+	    case AF_INET6:
+	    if ( aiv6 == (struct addrinfo*) 0 )
+		aiv6 = ai2;
+	    break;
+	    }
 	}
-	// loop through all the results and connect to the first we can
-	for(p = server_info; p != NULL; p = p->ai_next) {
-		if ((sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
-			perror("socket");
-			continue;
+
+    /* If there's an IPv4 address, use that, otherwise try IPv6. */
+    if ( aiv4 != (struct addrinfo*) 0 )
+	{
+	if ( sizeof(sa_in) < aiv4->ai_addrlen )
+	    {
+	    (void) fprintf(
+		stderr, "%s - sockaddr too small (%lu < %lu)\n",
+		hostname, (unsigned long) sizeof(sa_in),
+		(unsigned long) aiv4->ai_addrlen );
+	    exit( 1 );
+	    }
+	sock_family = aiv4->ai_family;
+	sock_type = aiv4->ai_socktype;
+	sock_protocol = aiv4->ai_protocol;
+	sa_len = aiv4->ai_addrlen;
+	(void) memmove( &sa_in, aiv4->ai_addr, sa_len );
+	goto ok;
+	}
+    if ( aiv6 != (struct addrinfo*) 0 )
+	{
+	if ( sizeof(sa_in) < aiv6->ai_addrlen )
+	    {
+	    (void) fprintf(
+		stderr, "%s - sockaddr too small (%lu < %lu)\n",
+		hostname, (unsigned long) sizeof(sa_in),
+		(unsigned long) aiv6->ai_addrlen );
+	    exit( 1 );
+	    }
+	sock_family = aiv6->ai_family;
+	sock_type = aiv6->ai_socktype;
+	sock_protocol = aiv6->ai_protocol;
+	sa_len = aiv6->ai_addrlen;
+	(void) memmove( &sa_in, aiv6->ai_addr, sa_len );
+	goto ok;
+	}
+
+    send_error(client_sock, 404, "Not Found", (char*) 0, "Unknown host." );
+
+    ok:
+    freeaddrinfo( ai );
+
+#else /* USE_IPV6 */
+
+    he = gethostbyname( hostname );
+    if ( he == (struct hostent*) 0 )
+	send_error(client_sock, 404, "Not Found", (char*) 0, "Unknown host." );
+    sock_family = sa_in.sin_family = he->h_addrtype;
+    sock_type = SOCK_STREAM;
+    sock_protocol = 0;
+    sa_len = sizeof(sa_in);
+    (void) memmove( &sa_in.sin_addr, he->h_addr, he->h_length );
+    sa_in.sin_port = htons( port );
+
+#endif /* USE_IPV6 */
+
+    sockfd = socket( sock_family, sock_type, sock_protocol );
+    if ( sockfd < 0 )
+	send_error(client_sock, 500, "Internal Error", (char*) 0, "Couldn't create socket." );
+
+    if ( connect( sockfd, (struct sockaddr*) &sa_in, sa_len ) < 0 )
+	send_error(client_sock, 503, "Service Unavailable", (char*) 0, "Connection refused." );
+
+    return sockfd;
+}
+
+//parse an http request and create a connection
+int create_http_connection(int client_sock, char_list http_request, int* ssl){
+	char method[BUF_SIZE], url[BUF_SIZE], protocol[BUF_SIZE], path[BUF_SIZE], host[BUF_SIZE];
+	unsigned short port;
+	int iport;
+    if (sscanf(http_request.data, "%[^ ] %[^ ] %[^\n]", method, url, protocol) != 3){
+		//TODO: handle bad request, invalid # of parameters
+	}
+	//a regular http connection
+	if (strncasecmp(url, "http://", 7) == 0){
+		//make sure it's lowercase
+		strncpy(url, "http", 4);	/* make sure it's lower case */
+		//if port is in url, with a path
+		if (sscanf(url, "http://%[^:/]:%d%s", host, &iport, path) == 3){
+		    port = (unsigned short) iport;
+		//for a regular url, default to 80
+		}else if(sscanf(url, "http://%[^/]%s", host, path) == 2){
+		    port = 80;
+		//if port is in url, without a path
+		}else if (sscanf(url, "http://%[^:/]:%d", host, &iport) == 2){
+			port = (unsigned short) iport;
+		    *path = '\0';
+		}else if (sscanf(url, "http://%[^/]", host) == 1){
+		    port = 80;
+		    *path = '\0';
+		}else{
+		    send_error(client_sock, 400, "Bad Request", (char*) 0, "Can't parse URL." );
 		}
-		if (connect(sock, p->ai_addr, p->ai_addrlen) == -1) {
-			perror("connect");
-			close(sock);
-			continue;
+		*ssl = 0;
+		printf("ssl: false, %s %s %d\n", method, host, port);
+	//an ssl connection
+	}else if(strcmp(method, "CONNECT" ) == 0){
+		//get the port to connect to
+		if (sscanf( url, "%[^:]:%d", host, &iport ) == 2 ){
+		    port = (unsigned short) iport;
+		//port not in url, default to 443
+		}else if (sscanf( url, "%s", host ) == 1){
+		    port = 443;
+		}else{
+			send_error(client_sock, 400, "Bad Request", (char*) 0, "Can't parse URL." );
 		}
-		break; // if we get here, we must have connected successfully
+		*ssl = 1;
+		printf("ssl: true, %s %s %d\n", method, host, port);
+	}else{
+		send_error(client_sock, 400, "Bad Request", (char*) 0, "Unknown URL type." );
 	}
-	if (p == NULL) {
-		// looped off the end of the list with no connection
-		fprintf(stderr, "failed to connect\n");
-		exit(2);
+	//TODO: add timeout possibly
+	return create_connection(client_sock, host, port);
+}
+
+static void send_error(int client_sock, int status, char* title, char* extra_header, char* text){
+	time_t now;
+	char timebuf[128], response[2048];
+	int i = 0;
+	//send the HTTP headers
+	i += sprintf(&response[i], "%s %d %s\r\n", PROTOCOL, status, title );
+    i += sprintf(&response[i], "Server: %s\r\n", SERVER_NAME );
+    now = time((time_t*) 0);
+    strftime( timebuf, sizeof(timebuf), RFC1123FMT, gmtime( &now ) );
+    i += sprintf(&response[i], "Date: %s\r\n", timebuf );
+    if ( extra_header != (char*) 0 ){
+		i += sprintf(&response[i], "%s\r\n", extra_header );
 	}
-	freeaddrinfo(server_info); // all done with this structure
-	return sock;
+    i += sprintf(&response[i], "Content-Type: text/html\r\n");
+    i += sprintf(&response[i], "Connection: close\r\n" );
+    i += sprintf(&response[i], "\r\n" );
+	//send the content
+    i += sprintf(&response[i], "\
+<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\" \"http://www.w3.org/TR/html4/loose.dtd\">\n\
+<html>\n\
+  <head>\n\
+    <meta http-equiv=\"Content-type\" content=\"text/html;charset=UTF-8\">\n\
+    <title>%d %s</title>\n\
+  </head>\n\
+  <body bgcolor=\"#cc9999\" text=\"#000000\" link=\"#2020ff\" vlink=\"#4040cc\">\n\
+    <h4>%d %s</h4>\n\n",
+	status, title, status, title );
+    i += sprintf(&response[i], "%s\n\n", text );
+    i += sprintf(&response[i], "\
+    <hr>\n\
+    <address><a href=\"%s\">%s</a></address>\n\
+  </body>\n\
+</html>\n",
+	SERVER_URL, SERVER_NAME);
+    //send the data to the client
+	send(client_sock, response, i, 0);
+    exit(1);
 }

@@ -1,10 +1,12 @@
 all:
-	gcc -O2 -s -o proxy proxy.c
-tomato:
-	mipsel-uclibc-gcc -O2 -s -o proxy proxy.c
-openwrt:
-	mipsel-linux-uclibc-gcc -O2 -s -o proxy proxy.c
-backfire:
-	mipsel-openwrt-linux-uclibc-gcc -O2 -s -o proxy proxy.c
+	gcc -c structs.c
+	gcc -c proxy.c
+	gcc -O2 -s -o proxy structs.o proxy.o
+test:
+	gcc -c structs.c
+	gcc -c compress.c
+	gcc -c tests/tests.c
+	gcc -O2 -s -o run_tests structs.o compress.o tests.o
+	./run_tests
 clean:
-	rm -rf proxy proxy.exe
+	rm -rf *.o proxy run_tests
