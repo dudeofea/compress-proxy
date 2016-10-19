@@ -31,9 +31,17 @@ int dict_contains(dict *d, char *str, int len){
 /* Add a string to the dictionnary */
 void dict_add(dict *d, char_list new_str){
 	//TODO: find diff or something
-	//char_list_print(new_str);
+	char_list_print(new_str);
 	int ind;
 	for (int i = 0; i < new_str.length; i++) {
+		//TODO: progressively try out longer and longer substrings of the new string (A)
+		//until we no longer find a match (B), at which point we start looking for a substring in the
+		//new string which matches a later part of the same string chain that we split off
+		//from in the first place (C)
+		//
+		//		A ——— B ————— C —————>			(existing string)
+		//			   \_____/					(new string)
+		//
 		if((ind = dict_contains(d, &new_str.data[i], 1)) < 0){
 			dict_add_node(d, make_node(new_str.data[i]));
 		}else{
