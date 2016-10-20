@@ -3,6 +3,6 @@
 
 #include "structs.h"
 
-void dict_add(dict *d, char_list new_str);
+void dict_add_string(dict *d, char_list new_str);
 
 #endif

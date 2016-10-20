@@ -56,13 +56,14 @@ void css_test1(){
 void dict_test1(){
 	dict d = dict_init();
 	//add a string to the dictionnary
-	dict_add(&d, char_list_from_str("cyka"));
+	dict_add_string(&d, char_list_from_str("cyka"));
 	//nodes should be equal to these
 	dict_node nodes1[] = {
-		make_node('c'),
-		make_node('y'),
-		make_node('k'),
-		make_node('a')
+		node_create(0),
+		node_create('c'),
+		node_create('y'),
+		node_create('k'),
+		node_create('a')
 	};
 	if(assert_int_equals(d.length, sizeof(nodes1)/sizeof(dict_node)) < 0){
 		printf("Length mismatch: %d != %ld\n", d.length, sizeof(nodes1)/sizeof(dict_node));
@@ -72,19 +73,20 @@ void dict_test1(){
 		return;
 	};
 	//add another string, similar to first
-	dict_add(&d, char_list_from_str("cnyaa"));
+	dict_add_string(&d, char_list_from_str("cnyaa"));
 	for (int i = 0; i < d.length; i++) {
 		printf("[%c] ", d.nodes[i].value);
 	}
 	printf("\n");
 	//check dictionnary again
 	dict_node nodes2[] = {
-		make_node('c'),
-		make_node('y'),
-		make_node('k'),
-		make_node('a'),
-		make_node('n'),
-		make_node('a')
+		node_create(0),
+		node_create('c'),
+		node_create('y'),
+		node_create('k'),
+		node_create('a'),
+		node_create('n'),
+		node_create('a')
 	};
 	if(assert_int_equals(d.length, sizeof(nodes2)/sizeof(dict_node)) < 0){
 		printf("Length mismatch: %d != %ld\n", d.length, sizeof(nodes2)/sizeof(dict_node));

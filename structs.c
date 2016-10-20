@@ -42,24 +42,64 @@ char_list char_list_from_str(char * str){
 /* linked-list dictionnary for compressing strings */
 dict dict_init(){
 	dict d;
-	d.length = 0;
-	d.mem_size = 2;
-	d.nodes = malloc(d.mem_size * sizeof(dict_node));
+	d.length = 1;
+	d.nodes_size = 2;
+	d.nodes = malloc(d.nodes_size * sizeof(dict_node));
+	//add root node
+	d.nodes[0] = node_create(0);
 	return d;
 }
 /* add a node to dictionnary and update size values */
-void dict_add_node(dict *d, dict_node n){
+int dict_add_node(dict *d, dict_node n){
+	//reallocate memory if needed
 	d->length++;
-	if(d->length > d->mem_size){
-		d->mem_size *= 2;
-		d->nodes = realloc(d->nodes, d->mem_size * sizeof(dict_node));
+	if(d->length > d->nodes_size){
+		d->nodes_size *= 2;
+		d->nodes = realloc(d->nodes, d->nodes_size * sizeof(dict_node));
 	}
+	//add the node
+	n.index = d->length-1;
 	d->nodes[d->length-1] = n;
+	return d->length-1;
+}
+
+/* show a simple printout of a dictionnary, in tree form */
+void dict_print(dict d){
+	for (int i = 0; i < d.length; i++) {
+		printf("(%c) addr: 0x%x, next: ", d.nodes[i].value, &d.nodes[i]);
+		for (int j = 0; j < d.nodes[i].branches_size; j++) {
+			printf("0x%x ", d.nodes[i].branches[j]);
+		}
+		printf("\n");
+	}
+	//TODO: do a BFS and print appropriate lines with | and /
 }
 
 /* dictionnary nodes of which the dictionnary is made of */
-dict_node make_node(char value){
+dict_node node_create(char value){
 	dict_node n;
 	n.value = value;
+	n.branches_size = 0;
+	n.branches = NULL;
+	n.index = 0;
 	return n;
+}
+
+/* add another link downstream to node */
+void node_add_next(dict_node *n, int next){
+	//add another branch
+	n->branches_size++;
+	n->branches = realloc(n->branches, n->branches_size * sizeof(dict_node*));
+	n->branches[n->branches_size-1] = next;
+}
+
+/* gets address of next node with given character value (NULL if not found) */
+int node_has_next(dict_node n, char c){
+	for (int i = 0; i < n.branches_size; i++) {
+		dict_node next = *(&n + n.branches[i] * sizeof(dict_node));
+		if(next.value == c){
+			return n.branches[i];
+		}
+	}
+	return -1;
 }
