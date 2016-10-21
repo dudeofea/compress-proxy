@@ -55,7 +55,7 @@ int dict_add_node(dict *d, dict_node n){
 	d->length++;
 	if(d->length > d->nodes_size){
 		d->nodes_size *= 2;
-		d->nodes = realloc(d->nodes, d->nodes_size * sizeof(dict_node));
+		d->nodes = (dict_node*) realloc(d->nodes, d->nodes_size * sizeof(dict_node));
 	}
 	//add the node
 	n.index = d->length-1;
@@ -66,7 +66,7 @@ int dict_add_node(dict *d, dict_node n){
 /* show a simple printout of a dictionnary, in tree form */
 void dict_print(dict d){
 	for (int i = 0; i < d.length; i++) {
-		printf("(%c) addr: 0x%x, next: ", d.nodes[i].value, &d.nodes[i]);
+		printf("(%c)\taddr: 0x%x,\tnext (%d): ", d.nodes[i].value, &d.nodes[i], d.nodes[i].branches_size);
 		for (int j = 0; j < d.nodes[i].branches_size; j++) {
 			printf("0x%x ", d.nodes[i].branches[j]);
 		}
@@ -89,16 +89,16 @@ dict_node node_create(char value){
 void node_add_next(dict_node *n, int next){
 	//add another branch
 	n->branches_size++;
-	n->branches = realloc(n->branches, n->branches_size * sizeof(dict_node*));
+	n->branches = (int*) realloc(n->branches, n->branches_size * sizeof(int));
 	n->branches[n->branches_size-1] = next;
 }
 
 /* gets address of next node with given character value (NULL if not found) */
-int node_has_next(dict_node n, char c){
-	for (int i = 0; i < n.branches_size; i++) {
-		dict_node next = *(&n + n.branches[i] * sizeof(dict_node));
-		if(next.value == c){
-			return n.branches[i];
+int node_has_next(dict_node *n, char c){
+	for (int i = 0; i < n->branches_size; i++) {
+		dict_node *next = n + n->branches[i];		//pointer arithmetic is weird
+		if(next->value == c){
+			return n->branches[i];
 		}
 	}
 	return -1;

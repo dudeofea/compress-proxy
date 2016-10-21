@@ -25,15 +25,16 @@ void dict_add_string(dict *d, char_list new_str){
 	for (int i = 0; i < new_str.length; i++) {
 		char_list_print(new_str);
 		dict_print(*d);
-		printf("current value: %c, looking for %c\n", cur_node->value, new_str.data[i]);
+		printf("(%c)[0x%x] looking for %c\n", cur_node->value, cur_node, new_str.data[i]);
 		//search which path has our next character
-		int next_char_ind = node_has_next(*cur_node, new_str.data[i]);
+		int next_char_ind = node_has_next(cur_node, new_str.data[i]);
 		//if no path has our character, add it
 		if(next_char_ind < 0){
 			printf("didnt find it\n");
 			int new_node_ind = dict_add_node(d, node_create(new_str.data[i]));
-			node_add_next(cur_node, new_node_ind);
-			cur_node = &d->nodes[new_node_ind];
+			cur_node = &d->nodes[cur_node->index];		//re-calc from possible resize
+			node_add_next(&d->nodes[cur_node->index], new_node_ind);
+			cur_node = &d->nodes[new_node_ind];			//move on to next node
 		//if we find a path with our character, follow it
 		}else{
 			printf("found it\n");

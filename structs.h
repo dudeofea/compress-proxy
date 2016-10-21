@@ -29,6 +29,6 @@ int dict_add_node(dict *d, dict_node n);
 void dict_print(dict d);
 dict_node node_create(char value);
 void node_add_next(dict_node *n, int next);
-int node_has_next(dict_node n, char c);
+int node_has_next(dict_node *n, char c);
 
 #endif
