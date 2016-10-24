@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include "structs.h"
 
 /* dynamically sized char buffer */
@@ -66,7 +67,8 @@ int dict_add_node(dict *d, dict_node n){
 /* show a simple printout of a dictionnary, in tree form */
 void dict_print(dict d){
 	for (int i = 0; i < d.length; i++) {
-		printf("(%c)\taddr: 0x%x,\tnext (%d): ", d.nodes[i].value, &d.nodes[i], d.nodes[i].branches_size);
+		unsigned int addr = (uintptr_t) &d.nodes[i];
+		printf("(%c)\taddr: 0x%x,\tnext (%d): ", d.nodes[i].value, addr, d.nodes[i].branches_size);
 		for (int j = 0; j < d.nodes[i].branches_size; j++) {
 			printf("0x%x ", d.nodes[i].branches[j]);
 		}
@@ -93,10 +95,10 @@ void node_add_next(dict_node *n, int next){
 	n->branches[n->branches_size-1] = next;
 }
 
-/* gets address of next node with given character value (NULL if not found) */
+/* gets index of next node with given character value (NULL if not found) */
 int node_has_next(dict_node *n, char c){
 	for (int i = 0; i < n->branches_size; i++) {
-		dict_node *next = n + n->branches[i];		//pointer arithmetic is weird
+		dict_node *next = n - n->index + n->branches[i];		//pointer arithmetic is weird
 		if(next->value == c){
 			return n->branches[i];
 		}

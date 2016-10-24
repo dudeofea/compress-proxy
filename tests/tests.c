@@ -74,10 +74,6 @@ void dict_test1(){
 	};
 	//add another string, similar to first
 	dict_add_string(&d, char_list_from_str("cnyaa"));
-	for (int i = 0; i < d.length; i++) {
-		printf("[%c] ", d.nodes[i].value);
-	}
-	printf("\n");
 	//check dictionnary again
 	dict_node nodes2[] = {
 		node_create(0),
@@ -98,10 +94,11 @@ void dict_test1(){
 }
 
 int main(int argc, char const *argv[]) {
-	printf("Running Correctness Tests:\n");
-	//TODO: correctness
+	printf("Running Correctness Tests: ");
+	//correctness
 	dict_test1();
-	printf("\nRunning Performance Tests:\n");
+	printf("\nRunning Performance Tests: ");
 	//TODO: performance
+	printf("\n");
 	return 0;
 }
